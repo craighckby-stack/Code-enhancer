@@ -6,6 +6,7 @@
  */
 
 import { OptimizationGoal, GeminiModelId } from '../types';
+import { sanitizeCode, sanitizeText } from './sanitizer';
 
 export interface OptimizationResult {
   optimizedCode: string;
@@ -13,6 +14,7 @@ export interface OptimizationResult {
   latencyMs: number;
   tokensEstimate: number;
   modelUsed?: string;
+  redactedSecretsCount?: number;
 }
 
 export interface ServerApiStatus {
@@ -26,24 +28,56 @@ export interface ServerApiStatus {
   }>;
 }
 
+export class GeminiApiError extends Error {
+  status: number;
+  isRateLimit: boolean;
+  isCapacity: boolean;
+  isNotFound: boolean;
+  isAuth: boolean;
+  raw?: string;
+
+  constructor(message: string, status: number = 500, raw?: string) {
+    super(message);
+    this.name = 'GeminiApiError';
+    this.status = status;
+    this.raw = raw;
+    const lower = message.toLowerCase();
+    this.isRateLimit = status === 429 || lower.includes('quota') || lower.includes('rate limit') || lower.includes('resource_exhausted');
+    this.isCapacity = status === 503 || lower.includes('unavailable') || lower.includes('high demand') || lower.includes('capacity');
+    this.isNotFound = status === 404 || lower.includes('not found');
+    this.isAuth = status === 401 || (status === 400 && lower.includes('api key'));
+  }
+}
+
 async function parseJson<T = any>(res: Response, fallbackError: string): Promise<T> {
   const text = await res.text();
   if (!text || !text.trim()) {
-    if (!res.ok) throw new Error(`${fallbackError} (HTTP ${res.status})`);
+    if (!res.ok) {
+      if (res.status === 429) throw new GeminiApiError(`Gemini API rate limit reached (HTTP 429)`, 429);
+      if (res.status === 503) throw new GeminiApiError(`Gemini model experiencing high demand (HTTP 503)`, 503);
+      if (res.status === 404) throw new GeminiApiError(`Gemini model endpoint not found (HTTP 404)`, 404);
+      throw new GeminiApiError(`${fallbackError} (HTTP ${res.status})`, res.status);
+    }
     return {} as T;
   }
   const trimmed = text.trim();
   if (trimmed.startsWith('<') || trimmed.toLowerCase().startsWith('<!doctype')) {
     if (!res.ok) {
-      throw new Error(`Server returned HTML error page (HTTP ${res.status}): ${res.statusText || 'Unavailable'}`);
+      throw new GeminiApiError(`Server returned HTML error page (HTTP ${res.status}): ${res.statusText || 'Unavailable'}`, res.status);
     }
-    throw new Error('Server returned HTML response instead of JSON.');
+    throw new GeminiApiError('Server returned HTML response instead of JSON.', 500);
   }
   try {
-    return JSON.parse(trimmed) as T;
-  } catch {
-    if (!res.ok) throw new Error(`${fallbackError} (HTTP ${res.status})`);
-    throw new Error(`Invalid JSON received from server: ${trimmed.slice(0, 100)}`);
+    const data = JSON.parse(trimmed);
+    if (!res.ok) {
+      const errMsg = data?.error || fallbackError;
+      throw new GeminiApiError(errMsg, res.status, data?.raw);
+    }
+    return data as T;
+  } catch (err: any) {
+    if (err instanceof GeminiApiError) throw err;
+    if (!res.ok) throw new GeminiApiError(`${fallbackError} (HTTP ${res.status})`, res.status);
+    throw new GeminiApiError(`Invalid JSON received from server: ${trimmed.slice(0, 100)}`, 500);
   }
 }
 
@@ -92,12 +126,15 @@ export async function optimizeSourceCode(
 
     if (response.ok) {
       const data = await parseJson<any>(response, 'Optimization response parsing failed');
+      const sanitized = sanitizeCode(data.optimizedCode || '', filePath);
+      const cleanSummary = sanitizeText(data.summary || '');
       return {
-        optimizedCode: data.optimizedCode,
-        summary: data.summary,
+        optimizedCode: sanitized.sanitized,
+        summary: cleanSummary,
         latencyMs: data.latencyMs,
         tokensEstimate: data.tokensEstimate,
         modelUsed: data.modelUsed || model,
+        redactedSecretsCount: (data.redactedSecretsCount || 0) + sanitized.redactedCount,
       };
     }
 
@@ -113,12 +150,14 @@ export async function optimizeSourceCode(
       await new Promise((resolve) => setTimeout(resolve, 600 + Math.random() * 400));
       const sim = simulateNeuralOptimization(code, filePath, goal);
       const latency = Math.round(performance.now() - startTime);
+      const sanitized = sanitizeCode(sim.code, filePath);
       return {
-        optimizedCode: sim.code,
-        summary: `${sim.summary} (Sovereign Neural Fallback)`,
+        optimizedCode: sanitized.sanitized,
+        summary: `${sanitizeText(sim.summary)} (Sovereign Neural Fallback)`,
         latencyMs: latency,
         tokensEstimate: Math.round(code.length / 3.8),
         modelUsed: 'sovereign-neural-v49',
+        redactedSecretsCount: sanitized.redactedCount,
       };
     }
 
@@ -128,12 +167,14 @@ export async function optimizeSourceCode(
       await new Promise((resolve) => setTimeout(resolve, 600 + Math.random() * 400));
       const sim = simulateNeuralOptimization(code, filePath, goal);
       const latency = Math.round(performance.now() - startTime);
+      const sanitized = sanitizeCode(sim.code, filePath);
       return {
-        optimizedCode: sim.code,
-        summary: `${sim.summary} (Sovereign Neural Fallback)`,
+        optimizedCode: sanitized.sanitized,
+        summary: `${sanitizeText(sim.summary)} (Sovereign Neural Fallback)`,
         latencyMs: latency,
         tokensEstimate: Math.round(code.length / 3.8),
         modelUsed: 'sovereign-neural-v49',
+        redactedSecretsCount: sanitized.redactedCount,
       };
     }
     throw err;

@@ -7,7 +7,7 @@
 
 export type EngineStatus = 'IDLE' | 'SCANNING' | 'FETCHING' | 'OPTIMIZING' | 'COMMITTING' | 'COOLDOWN' | 'ERROR';
 
-export type LogType = 'info' | 'success' | 'warning' | 'error' | 'neural';
+export type LogType = 'info' | 'success' | 'warning' | 'error' | 'neural' | 'noop';
 
 export interface TelemetryLog {
   id: string;
@@ -30,16 +30,22 @@ export interface MutationRecord {
   latencyMs: number;
   commitSha?: string;
   optimizationSummary?: string;
-  status: 'applied' | 'dry-run' | 'failed';
+  status: 'applied' | 'dry-run' | 'failed' | 'noop';
+  validationErrors?: string[];
+  redactedCount?: number;
+  typeChecked?: boolean;
 }
 
 export interface EngineMetrics {
   enhancements: number;
   validations: number;
   retries: number;
+  noops: number;
   totalScannedFiles: number;
   avgLatencyMs: number;
   tokensProcessed: number;
+  sanitizedSecretsCount?: number;
+  syntaxErrorsPrevented?: number;
 }
 
 export type OptimizationGoal = 'performance' | 'security' | 'readability' | 'type-safety' | 'comprehensive';
@@ -65,6 +71,17 @@ export interface EngineConfig {
   branch: string;
   fileScope?: FileScopeFilter;
   specificFilePath?: string;
+  blacklistedFiles?: string[];
+  autoSanitize?: boolean;
+  strictTypeCheck?: boolean;
+}
+
+export interface SaturationAlert {
+  path: string;
+  content: string;
+  summary?: string;
+  latencyMs?: number;
+  timestamp?: string;
 }
 
 export interface SimulatedFile {

@@ -27,6 +27,13 @@ import {
   FileText,
   FileCode,
   Layers,
+  Ban,
+  Plus,
+  Trash2,
+  X,
+  KeyRound,
+  ShieldAlert,
+  CheckCheck,
 } from 'lucide-react';
 import { EngineConfig, OptimizationGoal, GeminiModelId, FileScopeFilter } from '../types';
 import { SANDBOX_REPOSITORIES } from '../utils/mockRepo';
@@ -37,12 +44,14 @@ interface ConfigPanelProps {
   config: EngineConfig;
   onChange: (key: keyof EngineConfig, value: any) => void;
   disabled: boolean;
+  onOpenWipeMemory?: () => void;
 }
 
 export const ConfigPanel: React.FC<ConfigPanelProps> = ({
   config,
   onChange,
   disabled,
+  onOpenWipeMemory,
 }) => {
   const [showGhToken, setShowGhToken] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
@@ -54,6 +63,29 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
   const [repoError, setRepoError] = useState<string | null>(null);
   const [isManualRepoMode, setIsManualRepoMode] = useState(false);
   const [repoSearchFilter, setRepoSearchFilter] = useState('');
+  const [manualBlacklistInput, setManualBlacklistInput] = useState('');
+
+  const blacklistedFiles = config.blacklistedFiles || [];
+
+  const handleAddBlacklist = (pathToAdd: string) => {
+    const trimmed = pathToAdd.trim();
+    if (!trimmed) return;
+    if (!blacklistedFiles.includes(trimmed)) {
+      onChange('blacklistedFiles', [...blacklistedFiles, trimmed]);
+    }
+    setManualBlacklistInput('');
+  };
+
+  const handleRemoveBlacklist = (pathToRemove: string) => {
+    onChange(
+      'blacklistedFiles',
+      blacklistedFiles.filter((p) => p !== pathToRemove)
+    );
+  };
+
+  const handleClearBlacklist = () => {
+    onChange('blacklistedFiles', []);
+  };
 
   useEffect(() => {
     fetchServerApiStatus().then(setServerStatus);
@@ -520,6 +552,86 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
           )}
         </div>
 
+        {/* Blacklisted & Saturated Files Manager */}
+        <div className="p-3 bg-neutral-950/70 border border-neutral-800 rounded-2xl space-y-2.5">
+          <div className="flex items-center justify-between">
+            <label className="text-[10px] font-mono font-bold text-neutral-300 uppercase flex items-center gap-1.5">
+              <Ban className="w-3.5 h-3.5 text-amber-400" />
+              <span>Saturated & Blacklisted Files</span>
+              <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-neutral-800 text-neutral-400 font-mono">
+                {blacklistedFiles.length}
+              </span>
+            </label>
+            {blacklistedFiles.length > 0 && (
+              <button
+                type="button"
+                disabled={disabled}
+                onClick={handleClearBlacklist}
+                className="text-[10px] font-mono text-rose-400 hover:text-rose-300 transition-colors cursor-pointer"
+              >
+                Clear Blacklist
+              </button>
+            )}
+          </div>
+
+          {/* Quick add input */}
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              placeholder="e.g. README.md, src/types.ts"
+              value={manualBlacklistInput}
+              disabled={disabled}
+              onChange={(e) => setManualBlacklistInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleAddBlacklist(manualBlacklistInput);
+                }
+              }}
+              className="flex-1 bg-neutral-900 border border-neutral-800 rounded-xl px-2.5 py-1.5 text-xs text-white placeholder-neutral-500 outline-none focus:border-amber-500 transition-colors font-mono"
+            />
+            <button
+              type="button"
+              disabled={disabled || !manualBlacklistInput.trim()}
+              onClick={() => handleAddBlacklist(manualBlacklistInput)}
+              className="px-2.5 py-1.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 text-neutral-200 text-xs font-mono flex items-center gap-1 transition-colors cursor-pointer shrink-0"
+              title="Add file to blacklist"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Skip</span>
+            </button>
+          </div>
+
+          {/* List of blacklisted paths */}
+          {blacklistedFiles.length === 0 ? (
+            <p className="text-[10px] text-neutral-500 font-mono italic">
+              No files blacklisted. Saturated files with 0 diffs will prompt to be skipped here.
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto pr-1">
+              {blacklistedFiles.map((path) => (
+                <div
+                  key={path}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-neutral-900 border border-amber-500/30 text-amber-300 text-[11px] font-mono group"
+                >
+                  <span className="truncate max-w-[170px]" title={path}>
+                    {path}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => handleRemoveBlacklist(path)}
+                    className="p-0.5 text-neutral-400 hover:text-rose-400 rounded transition-colors cursor-pointer"
+                    title="Remove from blacklist"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         {/* Loop Interval Slider */}
         <div>
           <div className="flex items-center justify-between text-[10px] font-mono font-bold text-neutral-400 uppercase mb-1.5">
@@ -545,8 +657,52 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
           </div>
         </div>
 
+        {/* Auto-Sanitizer Guard */}
+        <div className="pt-2.5 border-t border-neutral-800/80">
+          <label className="flex items-center justify-between cursor-pointer">
+            <div>
+              <div className="text-xs font-semibold text-neutral-200 flex items-center gap-1.5">
+                <KeyRound className="w-3.5 h-3.5 text-emerald-400" /> Auto-Sanitize Secrets & PATs
+              </div>
+              <div className="text-[10px] text-neutral-500 font-mono">
+                Strip GitHub PATs, Gemini/OpenAI/Stripe keys & credentials before push
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              id="toggle-auto-sanitize"
+              checked={config.autoSanitize !== false}
+              disabled={disabled}
+              onChange={(e) => onChange('autoSanitize', e.target.checked)}
+              className="w-4 h-4 rounded accent-emerald-500 cursor-pointer"
+            />
+          </label>
+        </div>
+
+        {/* Strict Type & Syntax Verifier */}
+        <div className="pt-2.5 border-t border-neutral-800/80">
+          <label className="flex items-center justify-between cursor-pointer">
+            <div>
+              <div className="text-xs font-semibold text-neutral-200 flex items-center gap-1.5">
+                <ShieldAlert className="w-3.5 h-3.5 text-cyan-400" /> Strict Type & Syntax Verifier
+              </div>
+              <div className="text-[10px] text-neutral-500 font-mono">
+                Reject code containing broken types, unmatched braces, or AST parse errors
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              id="toggle-strict-typecheck"
+              checked={config.strictTypeCheck !== false}
+              disabled={disabled}
+              onChange={(e) => onChange('strictTypeCheck', e.target.checked)}
+              className="w-4 h-4 rounded accent-cyan-500 cursor-pointer"
+            />
+          </label>
+        </div>
+
         {/* Dry Run Toggle */}
-        <div className="pt-2 border-t border-neutral-800/80">
+        <div className="pt-2.5 border-t border-neutral-800/80">
           <label className="flex items-center justify-between cursor-pointer">
             <div>
               <div className="text-xs font-semibold text-neutral-200 flex items-center gap-1.5">
@@ -558,6 +714,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
             </div>
             <input
               type="checkbox"
+              id="toggle-dry-run"
               checked={config.dryRun}
               disabled={disabled}
               onChange={(e) => onChange('dryRun', e.target.checked)}
@@ -565,6 +722,33 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
             />
           </label>
         </div>
+
+        {/* Memory & Cache Purge */}
+        {onOpenWipeMemory && (
+          <div className="pt-3 border-t border-neutral-800/80">
+            <div className="p-3 bg-rose-950/20 border border-rose-900/30 rounded-2xl flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold text-rose-300 flex items-center gap-1.5">
+                  <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Memory & Cache Wipe</span>
+                </div>
+                <div className="text-[10px] text-neutral-400 font-mono mt-0.5">
+                  Flush mutation records, reset sandbox files & baseline
+                </div>
+              </div>
+              <button
+                type="button"
+                id="btn-config-wipe-memory"
+                disabled={disabled}
+                onClick={onOpenWipeMemory}
+                className="px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white text-xs font-mono font-bold transition-all shadow-md shadow-rose-600/20 flex items-center gap-1.5 cursor-pointer shrink-0"
+              >
+                <Trash2 className="w-3 h-3" />
+                <span>Wipe All</span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

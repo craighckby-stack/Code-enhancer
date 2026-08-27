@@ -23,7 +23,9 @@ import { LogStream } from './components/LogStream';
 import { DiffModal } from './components/DiffModal';
 import { LicenseModal } from './components/LicenseModal';
 import { DiagnosticsModal } from './components/DiagnosticsModal';
-import { SANDBOX_REPOSITORIES } from './utils/mockRepo';
+import { SaturationModal } from './components/SaturationModal';
+import { WipeMemoryModal } from './components/WipeMemoryModal';
+import { SANDBOX_REPOSITORIES, resetSandboxRepositories } from './utils/mockRepo';
 import {
   fetchRepoDetails,
   fetchRepoTree,
@@ -31,6 +33,9 @@ import {
   commitFileUpdate,
 } from './utils/github';
 import { optimizeSourceCode } from './utils/gemini';
+import { sanitizeCode, sanitizeText } from './utils/sanitizer';
+import { validateSourceCode } from './utils/validator';
+import { SaturationAlert } from './types';
 
 const INITIAL_CONFIG: EngineConfig = {
   targetRepo: 'craighckby/sovereign-kernel',
@@ -44,15 +49,20 @@ const INITIAL_CONFIG: EngineConfig = {
   branch: 'main',
   fileScope: 'all',
   specificFilePath: 'README.md',
+  autoSanitize: true,
+  strictTypeCheck: true,
 };
 
 const INITIAL_METRICS: EngineMetrics = {
   enhancements: 0,
+  noops: 0,
   validations: 0,
   retries: 0,
   totalScannedFiles: 4,
   avgLatencyMs: 0,
   tokensProcessed: 0,
+  sanitizedSecretsCount: 0,
+  syntaxErrorsPrevented: 0,
 };
 
 export default function App() {
@@ -67,8 +77,10 @@ export default function App() {
   const [latencyHistory, setLatencyHistory] = useState<number[]>(Array(20).fill(0));
   const [latestLatency, setLatestLatency] = useState<number>(0);
   const [selectedRecord, setSelectedRecord] = useState<MutationRecord | null>(null);
+  const [saturationAlert, setSaturationAlert] = useState<SaturationAlert | null>(null);
   const [isLicenseOpen, setIsLicenseOpen] = useState(false);
   const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
+  const [isWipeMemoryOpen, setIsWipeMemoryOpen] = useState(false);
   const [isCycling, setIsCycling] = useState(false);
 
   const isCyclingRef = useRef(false);
@@ -80,16 +92,75 @@ export default function App() {
     (msg: string, type: LogType = 'info', latencyMs?: number, path?: string) => {
       const now = new Date();
       const timestamp = now.toLocaleTimeString('en-US', { hour12: false });
+      const cleanMsg = sanitizeText(msg);
       const newLog: TelemetryLog = {
         id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
         timestamp,
         type,
-        msg,
+        msg: cleanMsg,
         latencyMs,
         path,
       };
 
       setLogs((prev) => [newLog, ...prev].slice(0, 150));
+    },
+    []
+  );
+
+  // Complete memory purge & engine state reset
+  const handleWipeMemory = useCallback(
+    (options: { resetConfig: boolean } = { resetConfig: true }) => {
+      // 1. Terminate autonomous cycle if running
+      if (loopTimerRef.current) {
+        clearTimeout(loopTimerRef.current);
+        loopTimerRef.current = null;
+      }
+      isCyclingRef.current = false;
+      fileIndexRef.current = 0;
+      setIsLive(false);
+      setStatus('IDLE');
+      setIsCycling(false);
+      setActivePath(null);
+
+      // 2. Reset in-memory sandbox repositories to clean initial templates
+      resetSandboxRepositories();
+
+      // 3. Reset metrics & latency history
+      setMetrics(INITIAL_METRICS);
+      setMutations([]);
+      setLatencyHistory(Array(20).fill(0));
+      setLatestLatency(0);
+      setSelectedRecord(null);
+      setSaturationAlert(null);
+
+      // 4. Clear browser storage cache
+      try {
+        localStorage.clear();
+        sessionStorage.clear();
+      } catch {
+        // ignore
+      }
+
+      // 5. Reset configuration or clear blacklist
+      if (options.resetConfig) {
+        setConfig(INITIAL_CONFIG);
+      } else {
+        setConfig((prev) => ({
+          ...prev,
+          blacklistedFiles: [],
+        }));
+      }
+
+      // 6. Push fresh bootstrap log
+      const now = new Date();
+      const timestamp = now.toLocaleTimeString('en-US', { hour12: false });
+      const purgeLog: TelemetryLog = {
+        id: `log-${Date.now()}-purge`,
+        timestamp,
+        type: 'success',
+        msg: '[MEMORY PURGE] Memory wiped & cache emptied. Sandbox repositories restored to initial seed, metrics zeroed, and engine state reset to baseline.',
+      };
+      setLogs([purgeLog]);
     },
     []
   );
@@ -108,13 +179,39 @@ export default function App() {
     setConfig((prev) => ({ ...prev, [key]: value }));
   };
 
+  // Blacklist & Saturation Handlers
+  const handleAddToBlacklist = (path: string, resumeLoop: boolean = true) => {
+    const current = config.blacklistedFiles || [];
+    if (!current.includes(path)) {
+      setConfig((prev) => ({
+        ...prev,
+        blacklistedFiles: [...(prev.blacklistedFiles || []), path],
+      }));
+    }
+    pushLog(`[BLACKLIST] File [${path}] added to blacklist and will be skipped in future passes.`, 'warning');
+    setSaturationAlert(null);
+    if (resumeLoop) {
+      setIsLive(true);
+      pushLog('Resuming autonomous optimization loop...', 'info');
+    }
+  };
+
+  const handleKeepInRotation = (resumeLoop: boolean = true) => {
+    if (saturationAlert?.path) {
+      pushLog(`[ROTATION] File [${saturationAlert.path}] kept in candidate rotation.`, 'info');
+    }
+    setSaturationAlert(null);
+    if (resumeLoop) {
+      setIsLive(true);
+      pushLog('Resuming autonomous optimization loop...', 'info');
+    }
+  };
+
   // Run a single optimization pass
   const executeCycle = useCallback(async () => {
     if (isCyclingRef.current) return;
     isCyclingRef.current = true;
     setIsCycling(true);
-
-    const cycleStartTime = performance.now();
 
     try {
       if (config.isSandboxMode) {
@@ -124,6 +221,10 @@ export default function App() {
 
         const repoData = SANDBOX_REPOSITORIES[config.targetRepo] || SANDBOX_REPOSITORIES['craighckby/sovereign-kernel'];
         let candidateFiles = repoData.files;
+
+        // Filter out blacklisted files
+        const blacklistedSet = new Set(config.blacklistedFiles || []);
+        candidateFiles = candidateFiles.filter((f) => !blacklistedSet.has(f.path));
 
         // Apply File Scope filter
         if (config.fileScope === 'markdown-only') {
@@ -141,6 +242,18 @@ export default function App() {
           if (matched.length > 0) {
             candidateFiles = matched;
           }
+        }
+
+        if (candidateFiles.length === 0) {
+          pushLog(
+            `All candidate files in sandbox repository are currently blacklisted or filtered (${blacklistedSet.size} blacklisted). Clear blacklist in Engine Configuration to resume.`,
+            'warning'
+          );
+          if (isLive) {
+            setIsLive(false);
+          }
+          setStatus('IDLE');
+          return;
         }
 
         setMetrics((prev) => ({ ...prev, totalScannedFiles: candidateFiles.length }));
@@ -162,21 +275,137 @@ export default function App() {
           config.isSandboxMode
         );
 
-        const originalLines = targetFile.content.split('\n').length;
-        const optimizedLines = result.optimizedCode.split('\n').length;
+        let cleanCode = result.optimizedCode;
+        let scrubbedCount = result.redactedSecretsCount || 0;
+
+        // 1. AUTO-SANITIZATION PASS
+        if (config.autoSanitize !== false) {
+          const san = sanitizeCode(cleanCode, targetFile.path);
+          cleanCode = san.sanitized;
+          scrubbedCount += san.redactedCount;
+          if (san.redactedCount > 0) {
+            pushLog(
+              `[AUTO-SANITIZER] Scrubbed ${san.redactedCount} token/secret(s) from [${targetFile.path}]: ${san.redactedTypes.join(', ')}`,
+              'warning',
+              undefined,
+              targetFile.path
+            );
+          }
+        }
+
+        // 2. STRICT TYPE & AST SYNTAX VERIFIER
+        let validationDiagnostics: string[] = [];
+        if (config.strictTypeCheck !== false) {
+          const val = await validateSourceCode(cleanCode, targetFile.path);
+          if (val.autoHealed && val.healedCode) {
+            cleanCode = val.healedCode;
+            pushLog(`[AUTO-HEALED] Fixed syntax/delimiter issue in [${targetFile.path}].`, 'info', undefined, targetFile.path);
+          }
+
+          if (!val.valid) {
+            validationDiagnostics = val.errors.map((e) => `Line ${e.line}, Col ${e.column}: ${e.message}`);
+            pushLog(
+              `[TYPE/SYNTAX REJECTED] Commit aborted for [${targetFile.path}] due to ${val.errors.length} defect(s): ${validationDiagnostics.slice(0, 2).join(' | ')}`,
+              'error',
+              result.latencyMs,
+              targetFile.path
+            );
+
+            // Record failed mutation in history
+            const failedRecord: MutationRecord = {
+              id: `mut-${Date.now()}`,
+              timestamp: new Date().toLocaleTimeString(),
+              path: targetFile.path,
+              originalCode: targetFile.content,
+              optimizedCode: cleanCode,
+              originalLines: targetFile.content.split('\n').length,
+              optimizedLines: cleanCode.split('\n').length,
+              latencyMs: result.latencyMs,
+              optimizationSummary: `Type/Syntax verification rejected: ${val.errors[0]?.message || 'Type error'}`,
+              status: 'failed',
+              validationErrors: validationDiagnostics,
+              redactedCount: scrubbedCount,
+              typeChecked: true,
+            };
+
+            setMutations((prev) => [failedRecord, ...prev]);
+            recordLatency(result.latencyMs);
+            setMetrics((prev) => ({
+              ...prev,
+              validations: (prev.validations || 0) + 1,
+              syntaxErrorsPrevented: (prev.syntaxErrorsPrevented || 0) + 1,
+              sanitizedSecretsCount: (prev.sanitizedSecretsCount || 0) + scrubbedCount,
+            }));
+
+            setStatus('IDLE');
+            return;
+          } else {
+            pushLog(`[TYPE-SAFE] AST syntax & type contracts verified for [${targetFile.path}].`, 'info', undefined, targetFile.path);
+          }
+        }
+
+        // --- SAME-FILE CHECK BEFORE COMMIT ---
+        const originalContent = targetFile.content;
+        const isIdentical = cleanCode.trim() === originalContent.trim();
+
+        if (isIdentical) {
+          // Log no-op event
+          pushLog(
+            `[NO-OP] Code saturation reached for [${targetFile.path}]: AI generated identical content (0 diffs). Commit skipped.`,
+            'noop',
+            result.latencyMs,
+            targetFile.path
+          );
+
+          recordLatency(result.latencyMs);
+          setMetrics((prev) => ({
+            ...prev,
+            noops: (prev.noops || 0) + 1,
+            validations: (prev.validations || 0) + (config.strictTypeCheck !== false ? 1 : 0),
+            sanitizedSecretsCount: (prev.sanitizedSecretsCount || 0) + scrubbedCount,
+            tokensProcessed: prev.tokensProcessed + (result.tokensEstimate || 0),
+          }));
+
+          // Auto-pause loop on saturation
+          if (isLive) {
+            setIsLive(false);
+          }
+          setStatus('IDLE');
+
+          // Trigger Saturation Alert Modal
+          setSaturationAlert({
+            path: targetFile.path,
+            content: originalContent,
+            summary: result.summary,
+            latencyMs: result.latencyMs,
+            timestamp: new Date().toLocaleTimeString(),
+          });
+
+          return;
+        }
+
+        // Apply mutation to sandbox store
+        if (!config.dryRun) {
+          targetFile.content = cleanCode;
+        }
+
+        const originalLines = originalContent.split('\n').length;
+        const optimizedLines = cleanCode.split('\n').length;
 
         // Record mutation
         const record: MutationRecord = {
           id: `mut-${Date.now()}`,
           timestamp: new Date().toLocaleTimeString(),
           path: targetFile.path,
-          originalCode: targetFile.content,
-          optimizedCode: result.optimizedCode,
+          originalCode: originalContent,
+          optimizedCode: cleanCode,
           originalLines,
           optimizedLines,
           latencyMs: result.latencyMs,
           optimizationSummary: result.summary,
           status: config.dryRun ? 'dry-run' : 'applied',
+          redactedCount: scrubbedCount,
+          typeChecked: config.strictTypeCheck !== false,
         };
 
         setMutations((prev) => [record, ...prev]);
@@ -195,6 +424,8 @@ export default function App() {
             enhancements: newEnhancements,
             tokensProcessed: newTokens,
             avgLatencyMs: newAvgLatency,
+            validations: (prev.validations || 0) + (config.strictTypeCheck !== false ? 1 : 0),
+            sanitizedSecretsCount: (prev.sanitizedSecretsCount || 0) + scrubbedCount,
           };
         });
 
@@ -225,28 +456,42 @@ export default function App() {
           throw new Error('No candidate source code files found in repository tree.');
         }
 
-        let candidateTree = tree;
+        // Filter out blacklisted files
+        const blacklistedSet = new Set(config.blacklistedFiles || []);
+        let candidateTree = tree.filter((item) => !blacklistedSet.has(item.path));
 
         // Apply File Scope filter
         if (config.fileScope === 'markdown-only') {
-          const mdFiles = tree.filter(
+          const mdFiles = candidateTree.filter(
             (item) => /\.(md|markdown|mdx|txt)$/i.test(item.path) || /readme(\.|$)/i.test(item.path)
           );
           if (mdFiles.length > 0) {
             candidateTree = mdFiles;
           } else {
-            pushLog(`No markdown files found matching filter. Falling back to all repository files.`, 'warning');
+            pushLog(`No markdown files found matching scope filter.`, 'warning');
           }
         } else if (config.fileScope === 'specific' && config.specificFilePath?.trim()) {
           const query = config.specificFilePath.trim().toLowerCase();
-          const matched = tree.filter(
+          const matched = candidateTree.filter(
             (item) => item.path.toLowerCase().includes(query) || item.path.toLowerCase() === query
           );
           if (matched.length > 0) {
             candidateTree = matched;
           } else {
-            pushLog(`Specified file "${config.specificFilePath}" not found in tree. Falling back to all files.`, 'warning');
+            pushLog(`Specified file "${config.specificFilePath}" not found in filtered tree.`, 'warning');
           }
+        }
+
+        if (candidateTree.length === 0) {
+          pushLog(
+            `All candidate files in repository are currently blacklisted or filtered (${blacklistedSet.size} blacklisted). Clear blacklist in Engine Configuration to resume.`,
+            'warning'
+          );
+          if (isLive) {
+            setIsLive(false);
+          }
+          setStatus('IDLE');
+          return;
         }
 
         setMetrics((prev) => ({ ...prev, totalScannedFiles: candidateTree.length }));
@@ -272,8 +517,117 @@ export default function App() {
           config.isSandboxMode
         );
 
-        const originalLines = fileData.content.split('\n').length;
-        const optimizedLines = result.optimizedCode.split('\n').length;
+        let cleanCode = result.optimizedCode;
+        let scrubbedCount = result.redactedSecretsCount || 0;
+
+        // 1. AUTO-SANITIZATION PASS
+        if (config.autoSanitize !== false) {
+          const san = sanitizeCode(cleanCode, target.path);
+          cleanCode = san.sanitized;
+          scrubbedCount += san.redactedCount;
+          if (san.redactedCount > 0) {
+            pushLog(
+              `[AUTO-SANITIZER] Scrubbed ${san.redactedCount} token/secret(s) from [${target.path}]: ${san.redactedTypes.join(', ')}`,
+              'warning',
+              undefined,
+              target.path
+            );
+          }
+        }
+
+        // 2. STRICT TYPE & AST SYNTAX VERIFIER
+        let validationDiagnostics: string[] = [];
+        if (config.strictTypeCheck !== false) {
+          const val = await validateSourceCode(cleanCode, target.path);
+          if (val.autoHealed && val.healedCode) {
+            cleanCode = val.healedCode;
+            pushLog(`[AUTO-HEALED] Fixed syntax/delimiter issue in [${target.path}].`, 'info', undefined, target.path);
+          }
+
+          if (!val.valid) {
+            validationDiagnostics = val.errors.map((e) => `Line ${e.line}, Col ${e.column}: ${e.message}`);
+            pushLog(
+              `[TYPE/SYNTAX REJECTED] Commit aborted for [${target.path}] due to ${val.errors.length} defect(s): ${validationDiagnostics.slice(0, 2).join(' | ')}`,
+              'error',
+              result.latencyMs,
+              target.path
+            );
+
+            // Record failed mutation in history
+            const failedRecord: MutationRecord = {
+              id: `mut-${Date.now()}`,
+              timestamp: new Date().toLocaleTimeString(),
+              path: target.path,
+              originalCode: fileData.content,
+              optimizedCode: cleanCode,
+              originalLines: fileData.content.split('\n').length,
+              optimizedLines: cleanCode.split('\n').length,
+              latencyMs: result.latencyMs,
+              optimizationSummary: `Type/Syntax verification rejected: ${val.errors[0]?.message || 'Type error'}`,
+              status: 'failed',
+              validationErrors: validationDiagnostics,
+              redactedCount: scrubbedCount,
+              typeChecked: true,
+            };
+
+            setMutations((prev) => [failedRecord, ...prev]);
+            recordLatency(result.latencyMs);
+            setMetrics((prev) => ({
+              ...prev,
+              validations: (prev.validations || 0) + 1,
+              syntaxErrorsPrevented: (prev.syntaxErrorsPrevented || 0) + 1,
+              sanitizedSecretsCount: (prev.sanitizedSecretsCount || 0) + scrubbedCount,
+            }));
+
+            setStatus('IDLE');
+            return;
+          } else {
+            pushLog(`[TYPE-SAFE] AST syntax & type contracts verified for [${target.path}].`, 'info', undefined, target.path);
+          }
+        }
+
+        // --- SAME-FILE CHECK BEFORE COMMIT ---
+        const originalContent = fileData.content;
+        const isIdentical = cleanCode.trim() === originalContent.trim();
+
+        if (isIdentical) {
+          // Log no-op event
+          pushLog(
+            `[NO-OP] Code saturation reached for [${target.path}]: AI generated identical content (0 diffs). Commit skipped.`,
+            'noop',
+            result.latencyMs,
+            target.path
+          );
+
+          recordLatency(result.latencyMs);
+          setMetrics((prev) => ({
+            ...prev,
+            noops: (prev.noops || 0) + 1,
+            validations: (prev.validations || 0) + (config.strictTypeCheck !== false ? 1 : 0),
+            sanitizedSecretsCount: (prev.sanitizedSecretsCount || 0) + scrubbedCount,
+            tokensProcessed: prev.tokensProcessed + (result.tokensEstimate || 0),
+          }));
+
+          // Auto-pause loop on saturation
+          if (isLive) {
+            setIsLive(false);
+          }
+          setStatus('IDLE');
+
+          // Trigger Saturation Alert Modal
+          setSaturationAlert({
+            path: target.path,
+            content: originalContent,
+            summary: result.summary,
+            latencyMs: result.latencyMs,
+            timestamp: new Date().toLocaleTimeString(),
+          });
+
+          return;
+        }
+
+        const originalLines = originalContent.split('\n').length;
+        const optimizedLines = cleanCode.split('\n').length;
 
         let commitSha = 'dry-run';
 
@@ -287,7 +641,7 @@ export default function App() {
           const commitRes = await commitFileUpdate(
             config.targetRepo,
             target.path,
-            result.optimizedCode,
+            cleanCode,
             fileData.sha,
             config.ghToken,
             `EMG Core v49: Neural Optimization on ${target.path}`
@@ -300,14 +654,16 @@ export default function App() {
           id: `mut-${Date.now()}`,
           timestamp: new Date().toLocaleTimeString(),
           path: target.path,
-          originalCode: fileData.content,
-          optimizedCode: result.optimizedCode,
+          originalCode: originalContent,
+          optimizedCode: cleanCode,
           originalLines,
           optimizedLines,
           latencyMs: result.latencyMs,
           commitSha,
           optimizationSummary: result.summary,
           status: config.dryRun ? 'dry-run' : 'applied',
+          redactedCount: scrubbedCount,
+          typeChecked: config.strictTypeCheck !== false,
         };
 
         setMutations((prev) => [record, ...prev]);
@@ -326,6 +682,8 @@ export default function App() {
             enhancements: newEnhancements,
             tokensProcessed: newTokens,
             avgLatencyMs: newAvgLatency,
+            validations: (prev.validations || 0) + (config.strictTypeCheck !== false ? 1 : 0),
+            sanitizedSecretsCount: (prev.sanitizedSecretsCount || 0) + scrubbedCount,
           };
         });
 
@@ -337,35 +695,44 @@ export default function App() {
         );
       }
     } catch (err: any) {
-      const errMsg = err.message || 'Unknown optimization fault.';
-      pushLog(`Engine Fault: ${errMsg}`, 'error');
+      const errMsg = err?.message || 'Unknown optimization fault.';
+      const status = err?.status || (err?.isNotFound ? 404 : err?.isRateLimit ? 429 : err?.isCapacity ? 503 : err?.isAuth ? 401 : err?.isConflict ? 409 : 500);
+      const lowerMsg = errMsg.toLowerCase();
+
       setMetrics((prev) => ({ ...prev, retries: prev.retries + 1 }));
       recordLatency(0);
       setStatus('ERROR');
 
-      // Auto-pause continuous autonomous loop on rate limit / quota exhaustion / 503 capacity
-      const isRateLimit =
-        errMsg.toLowerCase().includes('quota') ||
-        errMsg.toLowerCase().includes('rate limit') ||
-        errMsg.toLowerCase().includes('429') ||
-        errMsg.toLowerCase().includes('503') ||
-        errMsg.toLowerCase().includes('unavailable') ||
-        errMsg.toLowerCase().includes('capacity') ||
-        errMsg.toLowerCase().includes('high demand') ||
-        errMsg.toLowerCase().includes('resource_exhausted');
-
-      if (isRateLimit && isLive) {
-        setIsLive(false);
-        pushLog(
-          'Autonomous loop automatically paused to avoid quota exhaustion. Configure a custom Gemini API key in Engine Configuration or resume after rate limit window resets.',
-          'warning'
-        );
+      if (err?.isRateLimit || status === 429 || lowerMsg.includes('quota') || lowerMsg.includes('rate limit') || lowerMsg.includes('resource_exhausted')) {
+        pushLog(`[RATE LIMIT 429] ${errMsg}`, 'warning');
+        if (isLive) {
+          setIsLive(false);
+          pushLog('Autonomous loop auto-paused to avoid quota exhaustion. Please wait a moment or configure custom API key.', 'warning');
+        }
+      } else if (err?.isCapacity || status === 503 || lowerMsg.includes('unavailable') || lowerMsg.includes('high demand') || lowerMsg.includes('capacity')) {
+        pushLog(`[CAPACITY 503] ${errMsg}`, 'warning');
+        if (isLive) {
+          setIsLive(false);
+          pushLog('Autonomous loop auto-paused due to upstream model capacity limits.', 'warning');
+        }
+      } else if (err?.isNotFound || status === 404) {
+        pushLog(`[404 NOT FOUND] ${errMsg}`, 'error');
+      } else if (err?.isAuth || status === 401 || status === 403) {
+        pushLog(`[AUTH ERROR ${status}] ${errMsg}`, 'error');
+        if (isLive) {
+          setIsLive(false);
+          pushLog('Autonomous loop paused due to authentication or permission error.', 'error');
+        }
+      } else if (err?.isConflict || status === 409) {
+        pushLog(`[CONFLICT 409] ${errMsg} — Blob SHA mismatch. Re-fetching on next pass.`, 'warning');
+      } else {
+        pushLog(`[ENGINE FAULT] ${errMsg}`, 'error');
       }
     } finally {
       isCyclingRef.current = false;
       setIsCycling(false);
       setTimeout(() => {
-        setStatus(isLive ? 'IDLE' : 'IDLE');
+        setStatus('IDLE');
       }, 600);
     }
   }, [config, isLive, pushLog, recordLatency]);
@@ -452,6 +819,7 @@ export default function App() {
         onRunSingleCycle={executeCycle}
         onOpenLicense={() => setIsLicenseOpen(true)}
         onOpenDiagnostics={() => setIsDiagnosticsOpen(true)}
+        onOpenWipeMemory={() => setIsWipeMemoryOpen(true)}
         isCycling={isCycling}
       />
 
@@ -471,6 +839,7 @@ export default function App() {
             config={config}
             onChange={handleConfigChange}
             disabled={isLive}
+            onOpenWipeMemory={() => setIsWipeMemoryOpen(true)}
           />
         </div>
 
@@ -512,6 +881,21 @@ export default function App() {
       <DiagnosticsModal
         isOpen={isDiagnosticsOpen}
         onClose={() => setIsDiagnosticsOpen(false)}
+      />
+
+      {/* Code Saturation & Blacklist Modal */}
+      <SaturationModal
+        alert={saturationAlert}
+        onClose={() => setSaturationAlert(null)}
+        onAddToBlacklist={handleAddToBlacklist}
+        onKeepInRotation={handleKeepInRotation}
+      />
+
+      {/* Wipe Memory & System State Reset Modal */}
+      <WipeMemoryModal
+        isOpen={isWipeMemoryOpen}
+        onClose={() => setIsWipeMemoryOpen(false)}
+        onConfirmWipe={handleWipeMemory}
       />
 
       {/* Sovereign Footer */}

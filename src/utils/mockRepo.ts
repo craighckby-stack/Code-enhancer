@@ -7,7 +7,7 @@
 
 import { SimulatedFile } from '../types';
 
-export const SANDBOX_REPOSITORIES: Record<string, { description: string; files: SimulatedFile[] }> = {
+const INITIAL_SANDBOX_DEFINITIONS: Record<string, { description: string; files: SimulatedFile[] }> = {
   'craighckby/sovereign-kernel': {
     description: 'Sovereign low-latency neural routing & memory allocator kernel',
     files: [
@@ -208,3 +208,19 @@ cache.set('key', 42);
     ]
   }
 };
+
+function cloneSandboxRepos(): Record<string, { description: string; files: SimulatedFile[] }> {
+  return JSON.parse(JSON.stringify(INITIAL_SANDBOX_DEFINITIONS));
+}
+
+export const SANDBOX_REPOSITORIES: Record<string, { description: string; files: SimulatedFile[] }> = cloneSandboxRepos();
+
+export function resetSandboxRepositories(): void {
+  const fresh = cloneSandboxRepos();
+  for (const key of Object.keys(SANDBOX_REPOSITORIES)) {
+    delete SANDBOX_REPOSITORIES[key];
+  }
+  for (const [key, val] of Object.entries(fresh)) {
+    SANDBOX_REPOSITORIES[key] = val;
+  }
+}

@@ -5,6 +5,8 @@
  * Architecture: Type-safe modular unit with resilient state interfaces.
  */
 
+import { sanitizeCode, sanitizeText } from './sanitizer';
+
 export const b64ToUtf8 = (str: string): string => {
   try {
     return decodeURIComponent(
@@ -68,11 +70,34 @@ export interface GitHubUserRepo {
   };
 }
 
+export class GitHubError extends Error {
+  status: number;
+  isNotFound: boolean;
+  isRateLimit: boolean;
+  isAuth: boolean;
+  isConflict: boolean;
+
+  constructor(message: string, status: number = 500) {
+    super(message);
+    this.name = 'GitHubError';
+    this.status = status;
+    this.isNotFound = status === 404;
+    this.isRateLimit = status === 429 || status === 403 && message.toLowerCase().includes('rate limit');
+    this.isAuth = status === 401 || (status === 403 && !this.isRateLimit);
+    this.isConflict = status === 409;
+  }
+}
+
 async function parseJsonResponse<T = any>(res: Response, fallbackError: string): Promise<T> {
   const raw = await res.text();
   if (!raw || !raw.trim()) {
     if (!res.ok) {
-      throw new Error(`${fallbackError} (HTTP ${res.status})`);
+      if (res.status === 404) throw new GitHubError(`Resource not found (HTTP 404)`, 404);
+      if (res.status === 429) throw new GitHubError(`GitHub API rate limit reached (HTTP 429)`, 429);
+      if (res.status === 401) throw new GitHubError(`GitHub unauthorized (HTTP 401). Check Personal Access Token.`, 401);
+      if (res.status === 403) throw new GitHubError(`GitHub forbidden (HTTP 403). Check token scopes or rate limit.`, 403);
+      if (res.status === 409) throw new GitHubError(`GitHub file conflict (HTTP 409). SHA out of sync.`, 409);
+      throw new GitHubError(`${fallbackError} (HTTP ${res.status})`, res.status);
     }
     return {} as T;
   }
@@ -80,18 +105,29 @@ async function parseJsonResponse<T = any>(res: Response, fallbackError: string):
   const trimmed = raw.trim();
   if (trimmed.startsWith('<') || trimmed.toLowerCase().startsWith('<!doctype')) {
     if (!res.ok) {
-      throw new Error(`GitHub/Server returned HTML error page (HTTP ${res.status}): ${res.statusText || 'Unavailable'}`);
+      throw new GitHubError(`GitHub/Server returned HTML error page (HTTP ${res.status}): ${res.statusText || 'Unavailable'}`, res.status);
     }
-    throw new Error('Received HTML response instead of JSON. Check repository URL and connection.');
+    throw new GitHubError('Received HTML response instead of JSON. Check repository URL and connection.', 500);
   }
 
   try {
-    return JSON.parse(trimmed) as T;
-  } catch (err: any) {
+    const parsed = JSON.parse(trimmed);
     if (!res.ok) {
-      throw new Error(`${fallbackError} (HTTP ${res.status}): ${trimmed.slice(0, 120)}`);
+      const errMsg = parsed?.error || parsed?.message || fallbackError;
+      if (res.status === 404) throw new GitHubError(`[404 Not Found] ${errMsg}`, 404);
+      if (res.status === 429) throw new GitHubError(`[429 Rate Limit] ${errMsg}`, 429);
+      if (res.status === 401) throw new GitHubError(`[401 Unauthorized] ${errMsg}`, 401);
+      if (res.status === 403) throw new GitHubError(`[403 Forbidden] ${errMsg}`, 403);
+      if (res.status === 409) throw new GitHubError(`[409 Conflict] ${errMsg}`, 409);
+      throw new GitHubError(`[HTTP ${res.status}] ${errMsg}`, res.status);
     }
-    throw new Error(`Invalid response format from GitHub API: ${trimmed.slice(0, 100)}`);
+    return parsed as T;
+  } catch (err: any) {
+    if (err instanceof GitHubError) throw err;
+    if (!res.ok) {
+      throw new GitHubError(`${fallbackError} (HTTP ${res.status}): ${trimmed.slice(0, 120)}`, res.status);
+    }
+    throw new GitHubError(`Invalid response format from GitHub API: ${trimmed.slice(0, 100)}`, 500);
   }
 }
 
@@ -272,9 +308,12 @@ export async function commitFileUpdate(
   commitMessage: string
 ): Promise<{ commitSha: string }> {
   const cleanRepo = repo.trim().replace(/^https:\/\/github\.com\//, '').replace(/\/$/, '');
+  const sanitizedContent = sanitizeCode(content, filePath).sanitized;
+  const sanitizedMessage = sanitizeText(commitMessage);
+
   const body = {
-    message: commitMessage,
-    content: utf8ToB64(content),
+    message: sanitizedMessage,
+    content: utf8ToB64(sanitizedContent),
     sha: sha,
   };
 

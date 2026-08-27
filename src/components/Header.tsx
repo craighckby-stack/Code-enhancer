@@ -6,7 +6,7 @@
  */
 
 import React from 'react';
-import { Zap, Play, Square, RefreshCw, Layers, ShieldCheck, Github, Scale, Activity } from 'lucide-react';
+import { Zap, Play, Square, RefreshCw, Layers, ShieldCheck, Github, Scale, Activity, Trash2 } from 'lucide-react';
 import { EngineStatus } from '../types';
 
 interface HeaderProps {
@@ -18,6 +18,7 @@ interface HeaderProps {
   onRunSingleCycle: () => void;
   onOpenLicense: () => void;
   onOpenDiagnostics?: () => void;
+  onOpenWipeMemory?: () => void;
   isCycling: boolean;
 }
 
@@ -30,6 +31,7 @@ export const Header: React.FC<HeaderProps> = ({
   onRunSingleCycle,
   onOpenLicense,
   onOpenDiagnostics,
+  onOpenWipeMemory,
   isCycling,
 }) => {
   const getStatusColor = (st: EngineStatus) => {
@@ -116,6 +118,18 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Activity className="w-3.5 h-3.5 text-emerald-400" />
             <span className="hidden sm:inline">Diagnostics</span>
+          </button>
+        )}
+
+        {onOpenWipeMemory && (
+          <button
+            id="btn-header-wipe-memory"
+            onClick={onOpenWipeMemory}
+            title="Wipe memory, empty caches, and reset engine back to start"
+            className="px-3 py-2 rounded-xl bg-neutral-800/80 hover:bg-rose-950/40 text-neutral-400 hover:text-rose-300 border border-neutral-700/60 hover:border-rose-800/50 font-mono text-[11px] transition-all flex items-center gap-1.5 cursor-pointer group"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-neutral-400 group-hover:text-rose-400 transition-colors" />
+            <span className="hidden sm:inline">Wipe Memory</span>
           </button>
         )}
 

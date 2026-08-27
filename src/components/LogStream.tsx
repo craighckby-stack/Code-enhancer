@@ -50,6 +50,8 @@ export const LogStream: React.FC<LogStreamProps> = ({ logs, onClearLogs }) => {
         return 'text-amber-400 font-medium';
       case 'neural':
         return 'text-sky-300 font-medium';
+      case 'noop':
+        return 'text-amber-300 font-medium';
       default:
         return 'text-neutral-300';
     }
@@ -65,6 +67,8 @@ export const LogStream: React.FC<LogStreamProps> = ({ logs, onClearLogs }) => {
         return 'bg-amber-500/10 text-amber-400 border-amber-500/30';
       case 'neural':
         return 'bg-sky-500/10 text-sky-400 border-sky-500/30';
+      case 'noop':
+        return 'bg-amber-500/15 text-amber-300 border-amber-500/40 font-bold';
       default:
         return 'bg-neutral-800 text-neutral-400 border-neutral-700';
     }
@@ -90,7 +94,7 @@ export const LogStream: React.FC<LogStreamProps> = ({ logs, onClearLogs }) => {
         <div className="flex items-center gap-2">
           {/* Filters */}
           <div className="flex rounded-lg bg-neutral-950 p-0.5 border border-neutral-800 text-[11px] font-mono">
-            {(['all', 'success', 'neural', 'error'] as const).map((f) => (
+            {(['all', 'success', 'neural', 'noop', 'error'] as const).map((f) => (
               <button
                 key={f}
                 type="button"
@@ -101,7 +105,7 @@ export const LogStream: React.FC<LogStreamProps> = ({ logs, onClearLogs }) => {
                     : 'text-neutral-500 hover:text-neutral-300'
                 }`}
               >
-                {f}
+                {f === 'noop' ? 'NO-OP' : f}
               </button>
             ))}
           </div>

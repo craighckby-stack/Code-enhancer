@@ -6,7 +6,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { X, Copy, Check, FileCode, ArrowRight, Shield } from 'lucide-react';
+import { X, Copy, Check, FileCode, ArrowRight, Shield, AlertTriangle, KeyRound } from 'lucide-react';
 import { MutationRecord } from '../types';
 
 interface DiffModalProps {
@@ -38,6 +38,9 @@ export const DiffModal: React.FC<DiffModalProps> = ({ record, onClose }) => {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const isFailed = record.status === 'failed';
+  const isNoop = record.status === 'noop';
+
   return (
     <div
       id="emg-diff-modal-backdrop"
@@ -52,21 +55,33 @@ export const DiffModal: React.FC<DiffModalProps> = ({ record, onClose }) => {
         {/* Header */}
         <div className="p-4 md:px-6 border-b border-neutral-800 flex items-center justify-between bg-neutral-950/60">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
+            <div className={`w-8 h-8 rounded-lg border flex items-center justify-center ${
+              isFailed ? 'bg-rose-500/10 border-rose-500/30 text-rose-400' : 'bg-blue-500/10 border-blue-500/20 text-blue-400'
+            }`}>
               <FileCode className="w-4 h-4" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="font-bold text-white text-sm font-mono">{record.path}</h3>
                 <span
                   className={`text-[10px] font-mono px-2 py-0.5 rounded uppercase font-semibold ${
                     record.status === 'applied'
                       ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                      : isFailed
+                      ? 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
+                      : isNoop
+                      ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
                       : 'bg-sky-500/10 text-sky-400 border border-sky-500/30'
                   }`}
                 >
                   {record.status}
                 </span>
+                {(record.redactedCount || 0) > 0 && (
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1 font-semibold">
+                    <KeyRound className="w-3 h-3" />
+                    {record.redactedCount} token(s) scrubbed
+                  </span>
+                )}
               </div>
               <p className="text-[11px] text-neutral-400 font-mono mt-0.5">
                 Latency: {record.latencyMs}ms • Original: {record.originalLines} lines → Optimized: {record.optimizedLines} lines
@@ -116,6 +131,21 @@ export const DiffModal: React.FC<DiffModalProps> = ({ record, onClose }) => {
             </button>
           </div>
         </div>
+
+        {/* Validation Errors Notice */}
+        {record.validationErrors && record.validationErrors.length > 0 && (
+          <div className="px-6 py-3 bg-rose-950/40 border-b border-rose-900/50 text-xs text-rose-300 font-mono space-y-1">
+            <div className="flex items-center gap-1.5 font-bold text-rose-400 uppercase text-[10px]">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Type / Syntax Diagnostics Rejected Commit ({record.validationErrors.length} issues):</span>
+            </div>
+            <ul className="list-disc list-inside space-y-0.5 text-[11px] text-rose-200">
+              {record.validationErrors.map((err, i) => (
+                <li key={i}>{err}</li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {/* Summary Bar */}
         {record.optimizationSummary && (

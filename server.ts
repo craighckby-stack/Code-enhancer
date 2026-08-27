@@ -10,9 +10,41 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
+import ts from 'typescript';
 import { validateEnv } from './lib/env-validator';
 
 dotenv.config();
+
+// Server-side Secret & Token Sanitizer
+function sanitizeServerSecrets(rawText: string): { text: string; count: number } {
+  if (!rawText || typeof rawText !== 'string') return { text: '', count: 0 };
+  let text = rawText;
+  let count = 0;
+
+  const patterns = [
+    { name: 'ghp', regex: /\bghp_[a-zA-Z0-9]{36,255}\b/g, rep: '[REDACTED_GH_PAT]' },
+    { name: 'gh_pat', regex: /\bgithub_pat_[a-zA-Z0-9_]{80,255}\b/g, rep: '[REDACTED_GH_FINE_PAT]' },
+    { name: 'gho', regex: /\bgho_[a-zA-Z0-9]{36,255}\b/g, rep: '[REDACTED_GH_OAUTH]' },
+    { name: 'gh_token', regex: /\b(?:ghu|ghs|ghr)_[a-zA-Z0-9]{36,255}\b/g, rep: '[REDACTED_GH_SERVER_TOKEN]' },
+    { name: 'gemini', regex: /\bAIza[0-9A-Za-z-_]{35}\b/g, rep: '[REDACTED_GEMINI_KEY]' },
+    { name: 'openai', regex: /\bsk-(?:proj-|live-|test-|admin-)?[a-zA-Z0-9_\-]{24,}\b/g, rep: '[REDACTED_OPENAI_KEY]' },
+    { name: 'anthropic', regex: /\bsk-ant-[a-zA-Z0-9_\-]{24,}\b/g, rep: '[REDACTED_ANTHROPIC_KEY]' },
+    { name: 'stripe', regex: /\b(?:sk|rk|pk)_(?:live|test)_[0-9a-zA-Z]{24,}\b/g, rep: '[REDACTED_STRIPE_KEY]' },
+    { name: 'aws', regex: /\b(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}\b/g, rep: '[REDACTED_AWS_KEY]' },
+    { name: 'privkey', regex: /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g, rep: '[REDACTED_PRIVATE_KEY_BLOCK]' },
+    { name: 'jwt', regex: /\beyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/g, rep: '[REDACTED_JWT_TOKEN]' },
+  ];
+
+  for (const p of patterns) {
+    const matches = text.match(p.regex);
+    if (matches) {
+      count += matches.length;
+      text = text.replace(p.regex, p.rep);
+    }
+  }
+
+  return { text, count };
+}
 
 // Run startup diagnostic health check via lib/env-validator
 const envValidation = validateEnv();
@@ -405,17 +437,115 @@ Instructions:
       const latencyMs = Math.round(performance.now() - startTime);
       const tokensEstimate = response.usageMetadata?.totalTokenCount || Math.round(rawText.length / 3.8);
 
+      // Auto-Sanitize generated code and summary to purge any leaked tokens/API keys
+      const sanitizedCodeResult = sanitizeServerSecrets(optimized);
+      const sanitizedSummaryResult = sanitizeServerSecrets(summary);
+
       return res.json({
-        optimizedCode: optimized,
-        summary,
+        optimizedCode: sanitizedCodeResult.text,
+        summary: sanitizedSummaryResult.text,
         latencyMs,
         tokensEstimate,
         modelUsed: usedModel,
+        redactedSecretsCount: sanitizedCodeResult.count + sanitizedSummaryResult.count,
       });
     } catch (err: any) {
       console.error('Gemini Optimization Error:', err);
       const errMsg = err?.message || String(err) || 'Failed to run neural code optimization';
       return res.status(500).json({ error: errMsg });
+    }
+  });
+
+  // Native TypeScript AST & Diagnostic Validation Endpoint
+  app.post('/api/validate', (req, res) => {
+    try {
+      const { code, filePath } = req.body;
+      if (!code || typeof code !== 'string') {
+        return res.status(400).json({ error: 'Source code is required.' });
+      }
+
+      const fileName = filePath || 'source.tsx';
+      const isTs = /\.(ts|tsx)$/i.test(fileName);
+      const isJs = /\.(js|jsx|mjs|cjs)$/i.test(fileName);
+
+      if (!isTs && !isJs) {
+        return res.json({ valid: true, diagnostics: [] });
+      }
+
+      const scriptKind = fileName.endsWith('.tsx')
+        ? ts.ScriptKind.TSX
+        : fileName.endsWith('.jsx')
+        ? ts.ScriptKind.JSX
+        : fileName.endsWith('.js')
+        ? ts.ScriptKind.JS
+        : ts.ScriptKind.TS;
+
+      const sourceFile = ts.createSourceFile(
+        fileName,
+        code,
+        ts.ScriptTarget.Latest,
+        true,
+        scriptKind
+      );
+
+      const parseDiagnostics: readonly ts.Diagnostic[] = (sourceFile as any).parseDiagnostics || [];
+
+      // Run transpileModule for emission diagnostics
+      const transpileResult = ts.transpileModule(code, {
+        compilerOptions: {
+          target: ts.ScriptTarget.ES2022,
+          module: ts.ModuleKind.ESNext,
+          jsx: fileName.endsWith('x') ? ts.JsxEmit.ReactJSX : undefined,
+          noEmit: true,
+        },
+        reportDiagnostics: true,
+        fileName,
+      });
+
+      const allDiagnostics = [...parseDiagnostics, ...(transpileResult.diagnostics || [])];
+      const uniqueDiags = new Map<string, any>();
+      const lines = code.split('\n');
+
+      for (const diag of allDiagnostics) {
+        const start = diag.start ?? 0;
+        const { line, character } = sourceFile.getLineAndCharacterOfPosition(start);
+        const msgText = ts.flattenDiagnosticMessageText(diag.messageText, '\n');
+        const key = `${line}:${character}:${diag.code}:${msgText}`;
+
+        if (!uniqueDiags.has(key)) {
+          const lineText = lines[line] || '';
+          uniqueDiags.set(key, {
+            line: line + 1,
+            column: character + 1,
+            message: msgText,
+            code: diag.code,
+            severity: diag.category === ts.DiagnosticCategory.Warning ? 'warning' : 'error',
+            snippet: lineText.trim(),
+          });
+        }
+      }
+
+      const diagnostics = Array.from(uniqueDiags.values());
+      const hasErrors = diagnostics.some((d) => d.severity === 'error');
+
+      return res.json({
+        valid: !hasErrors,
+        diagnostics,
+      });
+    } catch (err: any) {
+      console.error('Validation route error:', err);
+      return res.status(500).json({ error: err?.message || 'Failed to validate source code.' });
+    }
+  });
+
+  // Explicit Secret Sanitizer Route
+  app.post('/api/sanitize', (req, res) => {
+    try {
+      const { text } = req.body;
+      const result = sanitizeServerSecrets(text || '');
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to sanitize text' });
     }
   });
 

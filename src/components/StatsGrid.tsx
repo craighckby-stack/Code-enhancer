@@ -6,7 +6,7 @@
  */
 
 import React from 'react';
-import { Cpu, ShieldCheck, Activity, RefreshCw, FileCode2, Sparkles } from 'lucide-react';
+import { Cpu, ShieldCheck, Activity, RefreshCw, FileCode2, Sparkles, KeyRound, ShieldAlert } from 'lucide-react';
 import { EngineMetrics } from '../types';
 
 interface StatsGridProps {
@@ -30,22 +30,36 @@ export const StatsGrid: React.FC<StatsGridProps> = ({
           <span className="text-[10px] font-mono uppercase tracking-wider font-semibold">Mutations</span>
           <Cpu className="w-4 h-4 text-blue-400" />
         </div>
-        <div className="text-2xl md:text-3xl font-black text-white tracking-tight">
-          {metrics.enhancements}
+        <div className="text-2xl md:text-3xl font-black text-white tracking-tight flex items-baseline gap-2">
+          <span>{metrics.enhancements}</span>
+          {metrics.noops > 0 && (
+            <span className="text-xs text-amber-400 font-mono font-medium">
+              +{metrics.noops} no-op
+            </span>
+          )}
         </div>
-        <div className="text-[10px] text-neutral-500 mt-1 font-mono">AST Optima</div>
+        <div className="text-[10px] text-neutral-500 mt-1 font-mono">
+          AST Optima {metrics.noops > 0 ? `(${metrics.noops} saturated)` : ''}
+        </div>
       </div>
 
-      {/* Recoveries */}
+      {/* Type & AST Verifications */}
       <div className="bg-neutral-900/80 border border-neutral-800/80 rounded-2xl p-4 shadow-lg backdrop-blur-sm relative overflow-hidden group">
         <div className="flex items-center justify-between text-neutral-400 mb-2">
-          <span className="text-[10px] font-mono uppercase tracking-wider font-semibold">Recoveries</span>
-          <RefreshCw className="w-4 h-4 text-sky-400" />
+          <span className="text-[10px] font-mono uppercase tracking-wider font-semibold">AST Checks</span>
+          <ShieldAlert className="w-4 h-4 text-cyan-400" />
         </div>
-        <div className="text-2xl md:text-3xl font-black text-sky-400 tracking-tight">
-          {metrics.retries}
+        <div className="text-2xl md:text-3xl font-black text-cyan-400 tracking-tight flex items-baseline gap-2">
+          <span>{metrics.validations}</span>
+          {(metrics.syntaxErrorsPrevented || 0) > 0 && (
+            <span className="text-xs text-rose-400 font-mono font-medium">
+              {metrics.syntaxErrorsPrevented} caught
+            </span>
+          )}
         </div>
-        <div className="text-[10px] text-neutral-500 mt-1 font-mono">Fault tolerant</div>
+        <div className="text-[10px] text-neutral-500 mt-1 font-mono">
+          {(metrics.syntaxErrorsPrevented || 0) > 0 ? `${metrics.syntaxErrorsPrevented} errors rejected` : 'Type-safe contracts'}
+        </div>
       </div>
 
       {/* Uplink Status */}
@@ -64,7 +78,7 @@ export const StatsGrid: React.FC<StatsGridProps> = ({
           {isSandbox ? 'SANDBOX' : hasGhToken ? 'SECURE' : 'PUBLIC'}
         </div>
         <div className="text-[10px] text-neutral-500 mt-1 font-mono flex items-center justify-between">
-          <span>Sovereign Bus</span>
+          <span>{(metrics.sanitizedSecretsCount || 0) > 0 ? `${metrics.sanitizedSecretsCount} keys scrubbed` : 'Sovereign Bus'}</span>
           {onOpenDiagnostics && <span className="text-[9px] text-emerald-400/70 font-bold">PROBE &rarr;</span>}
         </div>
       </div>
