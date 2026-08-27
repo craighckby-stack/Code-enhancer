@@ -1,3 +1,8 @@
+
+
+https://ai.studio/apps/c7006db0-163f-48a6-bc9e-dfdac7b37ff0
+
+
 # EMG Core v49
 
 An AI-powered codebase optimization dashboard designed to connect to GitHub repositories, scan source files, and suggest AI-driven code refactoring and performance enhancements.
