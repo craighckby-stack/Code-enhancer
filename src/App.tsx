@@ -87,6 +87,7 @@ export default function App() {
   const loopTimerRef = useRef<NodeJS.Timeout | null>(null);
   const fileIndexRef = useRef(0);
   const consecutiveFailuresRef = useRef<Record<string, number>>({});
+  const cooldownUntilRef = useRef<number>(0);
 
   // Push structured log
   const pushLog = useCallback(
@@ -119,6 +120,7 @@ export default function App() {
       isCyclingRef.current = false;
       fileIndexRef.current = 0;
       consecutiveFailuresRef.current = {};
+      cooldownUntilRef.current = 0;
       setIsLive(false);
       setStatus('IDLE');
       setIsCycling(false);
@@ -212,6 +214,7 @@ export default function App() {
   // Run a single optimization pass
   const executeCycle = useCallback(async () => {
     if (isCyclingRef.current) return;
+    if (Date.now() < cooldownUntilRef.current) return; // Currently cooling down
     isCyclingRef.current = true;
     setIsCycling(true);
 
@@ -765,17 +768,33 @@ export default function App() {
       recordLatency(0);
       setStatus('ERROR');
 
-      if (err?.isRateLimit || status === 429 || lowerMsg.includes('quota') || lowerMsg.includes('rate limit') || lowerMsg.includes('resource_exhausted')) {
-        pushLog(`[RATE LIMIT 429] ${errMsg}`, 'warning');
+      if (err?.isQuota || lowerMsg.includes('quota') || lowerMsg.includes('resource_exhausted')) {
+        pushLog(`[QUOTA EXCEEDED] ${errMsg}`, 'error');
         if (isLive) {
           setIsLive(false);
-          pushLog('Autonomous loop auto-paused to avoid quota exhaustion. Please wait a moment or configure custom API key.', 'warning');
+          pushLog('Autonomous loop paused. You have exceeded your API quota limit. Please check your Google AI Studio billing/plan.', 'error');
+        }
+      } else if (err?.isRateLimit || status === 429 || lowerMsg.includes('rate limit')) {
+        pushLog(`[RATE LIMIT 429] ${errMsg}`, 'warning');
+        if (isLive) {
+          let retrySeconds = 60;
+          const match = errMsg.match(/retry in\s+([0-9.]+)s/i);
+          if (match && match[1]) {
+            retrySeconds = Math.ceil(parseFloat(match[1])) + 5;
+          }
+          cooldownUntilRef.current = Date.now() + (retrySeconds * 1000);
+          pushLog(`Autonomous loop entering auto-cooldown for ${retrySeconds}s to avoid rate limit exhaustion.`, 'warning');
         }
       } else if (err?.isCapacity || status === 503 || lowerMsg.includes('unavailable') || lowerMsg.includes('high demand') || lowerMsg.includes('capacity')) {
         pushLog(`[CAPACITY 503] ${errMsg}`, 'warning');
         if (isLive) {
-          setIsLive(false);
-          pushLog('Autonomous loop auto-paused due to upstream model capacity limits.', 'warning');
+          let retrySeconds = 15;
+          const match = errMsg.match(/retry in\s+([0-9.]+)s/i);
+          if (match && match[1]) {
+            retrySeconds = Math.ceil(parseFloat(match[1])) + 2;
+          }
+          cooldownUntilRef.current = Date.now() + (retrySeconds * 1000);
+          pushLog(`Autonomous loop entering auto-cooldown for ${retrySeconds}s due to upstream capacity limits.`, 'warning');
         }
       } else if (err?.isNotFound || status === 404) {
         pushLog(`[404 NOT FOUND] ${errMsg}`, 'error');
@@ -838,6 +857,7 @@ export default function App() {
   // Toggle Live Autonomous loop
   const handleToggleLive = () => {
     if (!isLive) {
+      cooldownUntilRef.current = 0; // Reset cooldown on manual start
       setIsLive(true);
       pushLog('Engaging autonomous continuous mutation loop...', 'info');
     } else {

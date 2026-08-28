@@ -393,17 +393,19 @@ CRITICAL Requirements:
       }
 
       if (!response) {
-        const rawErrMsg = String(lastErr?.message || lastErr || '');
+        const rawErrMsg = String(lastErr?.message || lastErr || '').toLowerCase();
         const isCapacityOrRateLimit =
           rawErrMsg.includes('429') ||
           rawErrMsg.includes('503') ||
-          rawErrMsg.includes('UNAVAILABLE') ||
-          rawErrMsg.includes('RESOURCE_EXHAUSTED') ||
-          rawErrMsg.includes('Quota exceeded') ||
+          rawErrMsg.includes('unavailable') ||
+          rawErrMsg.includes('resource_exhausted') ||
+          rawErrMsg.includes('quota exceeded') ||
           rawErrMsg.includes('rate-limits') ||
-          rawErrMsg.includes('high demand');
+          rawErrMsg.includes('high demand') ||
+          rawErrMsg.includes('quota');
 
         if (isCapacityOrRateLimit) {
+          const isQuota = rawErrMsg.includes('quota') || rawErrMsg.includes('resource_exhausted');
           // Extract retry delay if available in the error message
           let retryDelay = '';
           const match = rawErrMsg.match(/retry in\s+([0-9.]+)s/i);
@@ -411,10 +413,13 @@ CRITICAL Requirements:
             retryDelay = ` (retry in ~${Math.ceil(parseFloat(match[1]))}s)`;
           }
 
+          const prefix = isQuota ? 'Gemini API Quota Exceeded' : 'Gemini API model capacity / high demand reached';
+
           return res.status(429).json({
-            error: `Gemini API model capacity / high demand reached${retryDelay}. The loop has been auto-paused. Please wait a moment or switch models.`,
+            error: `${prefix}${retryDelay}. The loop has been auto-paused. Please wait a moment or switch models.`,
             isRateLimit: true,
-            raw: rawErrMsg,
+            isQuota,
+            raw: String(lastErr?.message || lastErr || ''),
           });
         }
 
