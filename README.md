@@ -1,9 +1,9 @@
-
-
-https://ai.studio/apps/c7006db0-163f-48a6-bc9e-dfdac7b37ff0
-
-
 # EMG Core v49
+
+[![AI Studio Applet](https://img.shields.io/badge/Google%20AI%20Studio-Applet%20Live-4285F4?style=flat&logo=google)](https://ai.studio/apps/c7006db0-163f-48a6-bc9e-dfdac7b37ff0)
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+
+> **Live Applet**: [https://ai.studio/apps/c7006db0-163f-48a6-bc9e-dfdac7b37ff0](https://ai.studio/apps/c7006db0-163f-48a6-bc9e-dfdac7b37ff0)
 
 An autonomous, AI-powered codebase optimization and refactoring engine designed to connect directly to GitHub repositories or run in offline sandbox environments. EMG Core continuously scans source files, applies neural refactoring transformations via the Google Gemini API, validates code safety via abstract syntax tree (AST) diagnostics, and safely applies optimizations with zero-risk safeguards.
 

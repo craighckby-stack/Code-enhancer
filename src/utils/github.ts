@@ -6,6 +6,7 @@
  */
 
 import { sanitizeCode, sanitizeText } from './sanitizer';
+import { isMarkdownFile } from './validator';
 
 export const b64ToUtf8 = (str: string): string => {
   try {
@@ -247,7 +248,7 @@ export async function fetchRepoTree(repo: string, branch: string, token: string)
     (item: GitHubFileItem) =>
       item.type === 'blob' &&
       (/\.(js|jsx|ts|tsx|py|html|css|json|rs|go|c|cpp|h|md|markdown|mdx|txt)$/i.test(item.path) ||
-        /readme(\.|$)/i.test(item.path)) &&
+        isMarkdownFile(item.path)) &&
       !item.path.includes('node_modules/') &&
       !item.path.includes('dist/') &&
       !item.path.includes('.git/') &&

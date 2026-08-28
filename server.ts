@@ -15,6 +15,21 @@ import { validateEnv } from './lib/env-validator';
 
 dotenv.config();
 
+function isMarkdownFile(filePath: string): boolean {
+  if (!filePath || typeof filePath !== 'string') return false;
+  const normalized = filePath.trim().toLowerCase();
+  if (/\.(md|markdown|mdx|txt)$/i.test(normalized)) return true;
+  if (
+    /\.(js|jsx|ts|tsx|mjs|cjs|json|py|rs|go|c|cpp|h|hpp|css|scss|html|yaml|yml|sh|bash|zsh|toml|ini|env|sql|xml|svg|wasm)$/i.test(
+      normalized
+    )
+  ) {
+    return false;
+  }
+  const basename = normalized.split('/').pop()?.split('\\').pop() || '';
+  return /^(readme|license|changelog|contributing|authors|notice|security)(\.[a-z0-9_-]+)?$/i.test(basename);
+}
+
 // Server-side Secret & Token Sanitizer
 function sanitizeServerSecrets(rawText: string): { text: string; count: number } {
   if (!rawText || typeof rawText !== 'string') return { text: '', count: 0 };
@@ -296,10 +311,7 @@ async function startServer() {
         },
       });
 
-      const isMarkdown = Boolean(
-        filePath &&
-        (/\.(md|markdown|mdx|txt)$/i.test(filePath) || /readme(\.|$)/i.test(filePath))
-      );
+      const isMarkdown = isMarkdownFile(filePath);
 
       const codeDirectives: Record<string, string> = {
         performance: 'Focus heavily on execution speed, memory footprint reduction, caching, avoiding unnecessary allocations, loop unrolling where sensible, and data structure efficiency.',
@@ -330,10 +342,18 @@ Original ${isMarkdown ? 'Markdown Document' : 'Source Code'}:
 ${code}
 \`\`\`
 
-Instructions:
-1. Optimize, modernize, and enhance this ${isMarkdown ? 'markdown document' : 'code'} strictly according to the goal.
-2. ${isMarkdown ? 'Preserve all essential links, factual information, and structure while improving clarity, formatting, and completeness.' : 'Maintain all business logic, export names, and external API contracts intact.'}
-3. Output ONLY the optimized ${isMarkdown ? 'markdown content' : 'source code'} between delimiters @@@START and @@@END.
+CRITICAL Requirements:
+1. Optimize, modernize, and enhance this ${isMarkdown ? 'markdown document' : 'source code'} strictly according to the goal.
+2. ${
+  isMarkdown
+    ? 'Preserve all essential links, factual information, and document structure while improving clarity, formatting, and completeness.'
+    : 'Maintain all business logic, export names, function signatures, and external API contracts intact. Ensure all brackets, braces, parentheses, quotes, and language syntax are 100% syntactically valid and balanced.'
+}
+3. ${
+  isMarkdown
+    ? 'Output the complete optimized markdown between @@@START and @@@END.'
+    : 'Output raw executable source code ONLY between delimiters @@@START and @@@END. Do NOT include markdown code fences (like ```javascript) inside @@@START and @@@END. Do NOT output conversational or introductory text.'
+}
 4. Output a 1-sentence summary of enhancements immediately after @@@SUMMARY:`;
 
       const startTime = performance.now();
@@ -407,17 +427,6 @@ Instructions:
         ? 'Enhanced documentation structure, standard headings, and language tags.'
         : 'Applied neural performance and architecture optimizations.';
 
-      if (rawText.includes('@@@START') && rawText.includes('@@@END')) {
-        optimized = rawText.split('@@@START')[1].split('@@@END')[0].trim();
-      } else {
-        let cleaned = rawText.trim();
-        // Only strip wrapping markdown code fences if wrapped at the root
-        if (cleaned.startsWith('```') && cleaned.endsWith('```')) {
-          cleaned = cleaned.replace(/^```[a-z]*\n?/, '').replace(/\n?```$/, '').trim();
-        }
-        optimized = cleaned;
-      }
-
       if (rawText.includes('@@@SUMMARY:')) {
         const summaryPart = rawText.split('@@@SUMMARY:')[1].trim().split('\n')[0];
         if (summaryPart) {
@@ -425,9 +434,35 @@ Instructions:
         }
       }
 
+      if (rawText.includes('@@@START') && rawText.includes('@@@END')) {
+        optimized = rawText.split('@@@START')[1].split('@@@END')[0].trim();
+      } else {
+        let cleaned = rawText;
+        if (cleaned.includes('@@@SUMMARY:')) {
+          cleaned = cleaned.split('@@@SUMMARY:')[0];
+        }
+        cleaned = cleaned.trim();
+
+        // Extract from markdown code fence if present
+        if (!isMarkdown) {
+          const fenceMatch = cleaned.match(/```(?:[a-zA-Z0-9_-]+)?\s*\n([\s\S]*?)\n```/);
+          if (fenceMatch && fenceMatch[1]) {
+            cleaned = fenceMatch[1].trim();
+          } else if (cleaned.startsWith('```') && cleaned.endsWith('```')) {
+            cleaned = cleaned.replace(/^```[a-z0-9_-]*\n?/i, '').replace(/\n?```$/i, '').trim();
+          }
+        }
+        optimized = cleaned;
+      }
+
       // If summary is accidentally inside optimized code, clean it
       if (optimized.includes('@@@SUMMARY:')) {
         optimized = optimized.split('@@@SUMMARY:')[0].trim();
+      }
+
+      // Strip outer markdown fences on non-markdown files
+      if (!isMarkdown && optimized.startsWith('```') && optimized.endsWith('```')) {
+        optimized = optimized.replace(/^```[a-z0-9_-]*\n?/i, '').replace(/\n?```$/i, '').trim();
       }
 
       if (!optimized || optimized.length < 5) {
@@ -472,6 +507,7 @@ Instructions:
         return res.json({ valid: true, diagnostics: [] });
       }
 
+      const isJsx = fileName.endsWith('.tsx') || fileName.endsWith('.jsx');
       const scriptKind = fileName.endsWith('.tsx')
         ? ts.ScriptKind.TSX
         : fileName.endsWith('.jsx')
@@ -490,14 +526,19 @@ Instructions:
 
       const parseDiagnostics: readonly ts.Diagnostic[] = (sourceFile as any).parseDiagnostics || [];
 
-      // Run transpileModule for emission diagnostics
+      // Compiler options for emission diagnostics (JSX only for JSX files)
+      const compilerOptions: ts.CompilerOptions = {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.ESNext,
+        noEmit: true,
+      };
+
+      if (isJsx) {
+        compilerOptions.jsx = ts.JsxEmit.ReactJSX;
+      }
+
       const transpileResult = ts.transpileModule(code, {
-        compilerOptions: {
-          target: ts.ScriptTarget.ES2022,
-          module: ts.ModuleKind.ESNext,
-          jsx: fileName.endsWith('x') ? ts.JsxEmit.ReactJSX : undefined,
-          noEmit: true,
-        },
+        compilerOptions,
         reportDiagnostics: true,
         fileName,
       });
@@ -507,6 +548,11 @@ Instructions:
       const lines = code.split('\n');
 
       for (const diag of allDiagnostics) {
+        // Skip compiler options configuration errors not related to user source code
+        if (diag.code === 5052 || diag.code === 6046) {
+          continue;
+        }
+
         const start = diag.start ?? 0;
         const { line, character } = sourceFile.getLineAndCharacterOfPosition(start);
         const msgText = ts.flattenDiagnosticMessageText(diag.messageText, '\n');

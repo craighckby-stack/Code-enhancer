@@ -34,7 +34,7 @@ import {
 } from './utils/github';
 import { optimizeSourceCode } from './utils/gemini';
 import { sanitizeCode, sanitizeText } from './utils/sanitizer';
-import { validateSourceCode } from './utils/validator';
+import { validateSourceCode, isMarkdownFile } from './utils/validator';
 import { SaturationAlert } from './types';
 
 const INITIAL_CONFIG: EngineConfig = {
@@ -86,6 +86,7 @@ export default function App() {
   const isCyclingRef = useRef(false);
   const loopTimerRef = useRef<NodeJS.Timeout | null>(null);
   const fileIndexRef = useRef(0);
+  const consecutiveFailuresRef = useRef<Record<string, number>>({});
 
   // Push structured log
   const pushLog = useCallback(
@@ -117,6 +118,7 @@ export default function App() {
       }
       isCyclingRef.current = false;
       fileIndexRef.current = 0;
+      consecutiveFailuresRef.current = {};
       setIsLive(false);
       setStatus('IDLE');
       setIsCycling(false);
@@ -228,11 +230,11 @@ export default function App() {
 
         // Apply File Scope filter
         if (config.fileScope === 'markdown-only') {
-          const mdFiles = candidateFiles.filter(
-            (f) => /\.(md|markdown|mdx|txt)$/i.test(f.path) || /readme(\.|$)/i.test(f.path)
-          );
+          const mdFiles = candidateFiles.filter((f) => isMarkdownFile(f.path));
           if (mdFiles.length > 0) {
             candidateFiles = mdFiles;
+          } else {
+            pushLog(`No markdown files found matching scope filter.`, 'warning');
           }
         } else if (config.fileScope === 'specific' && config.specificFilePath?.trim()) {
           const query = config.specificFilePath.trim().toLowerCase();
@@ -242,6 +244,24 @@ export default function App() {
           if (matched.length > 0) {
             candidateFiles = matched;
           }
+        }
+
+        // Prefer files that haven't failed repeatedly if alternatives exist
+        const healthyCandidates = candidateFiles.filter(
+          (f) => (consecutiveFailuresRef.current[f.path] || 0) < 3
+        );
+        if (healthyCandidates.length > 0) {
+          candidateFiles = healthyCandidates;
+        } else if (candidateFiles.length > 0) {
+          pushLog(
+            `[AUTONOMOUS LOOP] All candidate files have reached max failure threshold. Pausing loop to prevent infinite cycling.`,
+            'warning'
+          );
+          if (isLive) {
+            setIsLive(false);
+          }
+          setStatus('IDLE');
+          return;
         }
 
         if (candidateFiles.length === 0) {
@@ -337,9 +357,22 @@ export default function App() {
               sanitizedSecretsCount: (prev.sanitizedSecretsCount || 0) + scrubbedCount,
             }));
 
+            consecutiveFailuresRef.current[targetFile.path] =
+              (consecutiveFailuresRef.current[targetFile.path] || 0) + 1;
+
+            if (consecutiveFailuresRef.current[targetFile.path] >= 3) {
+              pushLog(
+                `[AUTONOMOUS LOOP] File [${targetFile.path}] rejected by type/syntax validator ${consecutiveFailuresRef.current[targetFile.path]} consecutive times. Auto-rotating to next candidate file.`,
+                'warning',
+                undefined,
+                targetFile.path
+              );
+            }
+
             setStatus('IDLE');
             return;
           } else {
+            consecutiveFailuresRef.current[targetFile.path] = 0;
             pushLog(`[TYPE-SAFE] AST syntax & type contracts verified for [${targetFile.path}].`, 'info', undefined, targetFile.path);
           }
         }
@@ -462,9 +495,7 @@ export default function App() {
 
         // Apply File Scope filter
         if (config.fileScope === 'markdown-only') {
-          const mdFiles = candidateTree.filter(
-            (item) => /\.(md|markdown|mdx|txt)$/i.test(item.path) || /readme(\.|$)/i.test(item.path)
-          );
+          const mdFiles = candidateTree.filter((item) => isMarkdownFile(item.path));
           if (mdFiles.length > 0) {
             candidateTree = mdFiles;
           } else {
@@ -480,6 +511,24 @@ export default function App() {
           } else {
             pushLog(`Specified file "${config.specificFilePath}" not found in filtered tree.`, 'warning');
           }
+        }
+
+        // Prefer files that haven't failed repeatedly if alternatives exist
+        const healthyCandidates = candidateTree.filter(
+          (item) => (consecutiveFailuresRef.current[item.path] || 0) < 3
+        );
+        if (healthyCandidates.length > 0) {
+          candidateTree = healthyCandidates;
+        } else if (candidateTree.length > 0) {
+          pushLog(
+            `[AUTONOMOUS LOOP] All repository candidate files have reached max failure threshold. Pausing loop to prevent cycling.`,
+            'warning'
+          );
+          if (isLive) {
+            setIsLive(false);
+          }
+          setStatus('IDLE');
+          return;
         }
 
         if (candidateTree.length === 0) {
@@ -579,9 +628,22 @@ export default function App() {
               sanitizedSecretsCount: (prev.sanitizedSecretsCount || 0) + scrubbedCount,
             }));
 
+            consecutiveFailuresRef.current[target.path] =
+              (consecutiveFailuresRef.current[target.path] || 0) + 1;
+
+            if (consecutiveFailuresRef.current[target.path] >= 3) {
+              pushLog(
+                `[AUTONOMOUS LOOP] File [${target.path}] rejected by type/syntax validator ${consecutiveFailuresRef.current[target.path]} consecutive times. Auto-rotating to next candidate file.`,
+                'warning',
+                undefined,
+                target.path
+              );
+            }
+
             setStatus('IDLE');
             return;
           } else {
+            consecutiveFailuresRef.current[target.path] = 0;
             pushLog(`[TYPE-SAFE] AST syntax & type contracts verified for [${target.path}].`, 'info', undefined, target.path);
           }
         }

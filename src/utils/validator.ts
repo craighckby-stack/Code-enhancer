@@ -24,6 +24,24 @@ export interface ValidationResult {
 }
 
 /**
+ * Detect if a file path is a Markdown/Documentation document
+ */
+export function isMarkdownFile(filePath: string): boolean {
+  if (!filePath || typeof filePath !== 'string') return false;
+  const normalized = filePath.trim().toLowerCase();
+  if (/\.(md|markdown|mdx|txt)$/i.test(normalized)) return true;
+  if (
+    /\.(js|jsx|ts|tsx|mjs|cjs|json|py|rs|go|c|cpp|h|hpp|css|scss|html|yaml|yml|sh|bash|zsh|toml|ini|env|sql|xml|svg|wasm)$/i.test(
+      normalized
+    )
+  ) {
+    return false;
+  }
+  const basename = normalized.split('/').pop()?.split('\\').pop() || '';
+  return /^(readme|license|changelog|contributing|authors|notice|security)(\.[a-z0-9_-]+)?$/i.test(basename);
+}
+
+/**
  * Determine language from file path
  */
 export function getLanguageFromFilePath(filePath: string): string {
@@ -34,12 +52,43 @@ export function getLanguageFromFilePath(filePath: string): string {
   if (lower.endsWith('.js') || lower.endsWith('.mjs') || lower.endsWith('.cjs')) return 'javascript';
   if (lower.endsWith('.json')) return 'json';
   if (lower.endsWith('.py')) return 'python';
-  if (/\.(md|markdown|mdx|txt)$/.test(lower) || lower.includes('readme')) return 'markdown';
   if (lower.endsWith('.rs')) return 'rust';
   if (lower.endsWith('.go')) return 'go';
   if (lower.endsWith('.html')) return 'html';
   if (lower.endsWith('.css')) return 'css';
+  if (isMarkdownFile(lower)) return 'markdown';
   return 'generic';
+}
+
+/**
+ * Unwraps accidental markdown code fences (```js ... ```) that AI might have included
+ */
+export function unwrapMarkdownCodeFences(code: string, language: string): { unwrapped: string; wasWrapped: boolean } {
+  if (language === 'markdown') return { unwrapped: code, wasWrapped: false };
+  const trimmed = code.trim();
+
+  // 1. If wrapped between delimiters @@@START and @@@END, extract that
+  if (trimmed.includes('@@@START') && trimmed.includes('@@@END')) {
+    const extracted = trimmed.split('@@@START')[1].split('@@@END')[0].trim();
+    return { unwrapped: extracted, wasWrapped: true };
+  }
+
+  // 2. If code contains a markdown code fence block anywhere inside commentary
+  const fenceMatch = trimmed.match(/```(?:[a-zA-Z0-9_-]+)?\s*\n([\s\S]*?)\n```/);
+  if (fenceMatch && fenceMatch[1]) {
+    return { unwrapped: fenceMatch[1].trim(), wasWrapped: true };
+  }
+
+  // 3. Simple root-wrapped code fence
+  if (trimmed.startsWith('```') && trimmed.endsWith('```')) {
+    const lines = trimmed.split('\n');
+    if (lines.length >= 2) {
+      const contentLines = lines.slice(1, -1);
+      return { unwrapped: contentLines.join('\n'), wasWrapped: true };
+    }
+  }
+
+  return { unwrapped: code, wasWrapped: false };
 }
 
 /**
@@ -57,11 +106,13 @@ function checkDelimitersAndStrings(
   let inDoubleQuote = false;
   let inTemplateString = false;
   let inMultiLineComment = false;
+  let inRegex = false;
   let inPythonTripleSingle = false;
   let inPythonTripleDouble = false;
 
   let stringStartLine = 1;
   let stringStartCol = 1;
+  let templateBraceDepth = 0;
 
   for (let l = 0; l < lines.length; l++) {
     const line = lines[l];
@@ -74,7 +125,7 @@ function checkDelimitersAndStrings(
       const prevChar = c > 0 ? line[c - 1] : '';
 
       // Skip escaped characters
-      if (prevChar === '\\' && (inSingleQuote || inDoubleQuote || inTemplateString)) {
+      if (prevChar === '\\' && (inSingleQuote || inDoubleQuote || inTemplateString || inRegex)) {
         continue;
       }
 
@@ -96,13 +147,12 @@ function checkDelimitersAndStrings(
           continue;
         }
         if (char === '#' && !inSingleQuote && !inDoubleQuote) {
-          // Rest of line is comment
-          break;
+          break; // Rest of line is comment
         }
       }
 
-      // JS/TS Single-line comment //
-      if (!isPython && !inSingleQuote && !inDoubleQuote && !inTemplateString && !inMultiLineComment) {
+      // JS/TS/Go/Rust Single-line comment //
+      if (!isPython && !inSingleQuote && !inDoubleQuote && !inTemplateString && !inMultiLineComment && !inRegex) {
         if (char === '/' && nextChar === '/') {
           break; // Rest of line is comment
         }
@@ -119,6 +169,33 @@ function checkDelimitersAndStrings(
           inMultiLineComment = false;
           c++;
         }
+        continue;
+      }
+
+      // Regular Expression Literal detection in JS/TS
+      if (!isPython && !inSingleQuote && !inDoubleQuote && !inTemplateString && !inMultiLineComment) {
+        if (char === '/' && !inRegex) {
+          const before = line.slice(0, c).trim();
+          const lastChar = before.slice(-1);
+          const isRegexStart =
+            before.length === 0 ||
+            /[=([:,!&|?+\-*/;^~{}]/.test(lastChar) ||
+            /\b(?:return|case|throw|typeof|instanceof|yield|await|delete|void)\b$/.test(before);
+
+          if (isRegexStart && nextChar !== '/' && nextChar !== '*') {
+            inRegex = true;
+            continue;
+          }
+        } else if (char === '/' && inRegex) {
+          inRegex = false;
+          while (c + 1 < line.length && /[gimsuyvd]/.test(line[c + 1])) {
+            c++;
+          }
+          continue;
+        }
+      }
+
+      if (inRegex) {
         continue;
       }
 
@@ -160,10 +237,17 @@ function checkDelimitersAndStrings(
           }
           continue;
         }
+
+        if (inTemplateString && char === '$' && nextChar === '{') {
+          templateBraceDepth++;
+          stack.push({ char: '{', line: lineNum, col: colNum });
+          c++;
+          continue;
+        }
       }
 
       // If inside string literal, skip delimiter matching
-      if (inSingleQuote || inDoubleQuote || inTemplateString) {
+      if (inSingleQuote || inDoubleQuote || (inTemplateString && templateBraceDepth === 0)) {
         continue;
       }
 
@@ -172,6 +256,11 @@ function checkDelimitersAndStrings(
         stack.push({ char, line: lineNum, col: colNum });
       } else if (char === ')' || char === '}' || char === ']') {
         const top = stack.pop();
+        if (char === '}' && templateBraceDepth > 0 && top && top.char === '{') {
+          templateBraceDepth--;
+          continue;
+        }
+
         if (!top) {
           errors.push({
             line: lineNum,
@@ -220,6 +309,9 @@ function checkDelimitersAndStrings(
         severity: 'error',
       });
       inDoubleQuote = false;
+    }
+    if (inRegex) {
+      inRegex = false;
     }
   }
 
@@ -449,7 +541,7 @@ function validateMarkdown(code: string): { errors: ValidationError[]; unclosedFe
 async function callServerTsValidator(
   code: string,
   filePath: string
-): Promise<ValidationError[]> {
+): Promise<{ reachable: boolean; diagnostics: ValidationError[] }> {
   try {
     const res = await fetch('/api/validate', {
       method: 'POST',
@@ -457,10 +549,10 @@ async function callServerTsValidator(
       body: JSON.stringify({ code, filePath }),
     });
 
-    if (!res.ok) return [];
+    if (!res.ok) return { reachable: false, diagnostics: [] };
     const data = await res.json();
     if (Array.isArray(data.diagnostics)) {
-      return data.diagnostics.map((d: any) => ({
+      const diagnostics = data.diagnostics.map((d: any) => ({
         line: d.line || 1,
         column: d.column || 1,
         message: d.message || 'TypeScript Diagnostic Error',
@@ -468,21 +560,22 @@ async function callServerTsValidator(
         severity: d.severity === 'warning' ? 'warning' : 'error',
         snippet: d.snippet,
       }));
+      return { reachable: true, diagnostics };
     }
+    return { reachable: true, diagnostics: [] };
   } catch {
-    // Network / server offline fallback - local checks suffice
+    return { reachable: false, diagnostics: [] };
   }
-  return [];
 }
 
 /**
  * Main Code and Type Error Validation Engine
  */
 export async function validateSourceCode(
-  code: string,
+  rawCode: string,
   filePath: string
 ): Promise<ValidationResult> {
-  if (!code || !code.trim()) {
+  if (!rawCode || !rawCode.trim()) {
     return {
       valid: false,
       language: getLanguageFromFilePath(filePath),
@@ -501,10 +594,19 @@ export async function validateSourceCode(
   }
 
   const language = getLanguageFromFilePath(filePath);
-  const errors: ValidationError[] = [];
-  const warnings: string[] = [];
   let autoHealed = false;
   let healedCode: string | undefined = undefined;
+
+  // Auto-unwrap markdown fences if the model output raw markdown wrapper around source files
+  const { unwrapped, wasWrapped } = unwrapMarkdownCodeFences(rawCode, language);
+  let code = unwrapped;
+  if (wasWrapped) {
+    autoHealed = true;
+    healedCode = code;
+  }
+
+  const errors: ValidationError[] = [];
+  const warnings: string[] = [];
 
   // 1. JSON Specific Check
   if (language === 'json') {
@@ -514,7 +616,8 @@ export async function validateSourceCode(
       language,
       errors: jsonErrors,
       warnings,
-      autoHealed: false,
+      autoHealed,
+      healedCode,
     };
   }
 
@@ -522,7 +625,6 @@ export async function validateSourceCode(
   if (language === 'markdown') {
     const { errors: mdErrors, unclosedFence } = validateMarkdown(code);
     if (unclosedFence) {
-      // Auto-heal by closing trailing fence
       healedCode = code.trimEnd() + '\n```\n';
       autoHealed = true;
       return {
@@ -539,36 +641,49 @@ export async function validateSourceCode(
       language,
       errors: mdErrors,
       warnings,
-      autoHealed: false,
+      autoHealed,
+      healedCode,
     };
   }
 
-  // 3. Delimiter & String Check (TS, JS, Python, Rust, Go, etc.)
+  // 3. TypeScript & JavaScript authoritative AST & Compiler Check
+  const isJsTs =
+    language === 'typescript' ||
+    language === 'typescript-jsx' ||
+    language === 'javascript' ||
+    language === 'javascript-jsx';
+
+  if (isJsTs) {
+    const serverResult = await callServerTsValidator(code, filePath);
+
+    if (serverResult.reachable) {
+      errors.push(...serverResult.diagnostics);
+
+      const tsPatternErrors = checkTypeScriptPatterns(code);
+      for (const err of tsPatternErrors) {
+        if (!errors.some((e) => e.line === err.line && e.message === err.message)) {
+          errors.push(err);
+        }
+      }
+
+      const valid = errors.filter((e) => e.severity === 'error').length === 0;
+      return {
+        valid,
+        language,
+        errors,
+        warnings,
+        autoHealed,
+        healedCode,
+      };
+    }
+  }
+
+  // 4. Non-JS/TS or Offline Fallback Delimiter & Token Scanner
   const isPython = language === 'python';
   const delimiterCheck = checkDelimitersAndStrings(code, isPython);
   errors.push(...delimiterCheck.errors);
 
-  // 4. TypeScript / JavaScript Specific Syntax & Simple Type checks
-  if (
-    language === 'typescript' ||
-    language === 'typescript-jsx' ||
-    language === 'javascript' ||
-    language === 'javascript-jsx'
-  ) {
-    const tsErrors = checkTypeScriptPatterns(code);
-    errors.push(...tsErrors);
-
-    // Call server-side native TS diagnostic compiler if available
-    const serverDiagnostics = await callServerTsValidator(code, filePath);
-    for (const diag of serverDiagnostics) {
-      // Avoid duplicate reports for same line/message
-      if (!errors.some((e) => e.line === diag.line && e.message === diag.message)) {
-        errors.push(diag);
-      }
-    }
-  }
-
-  // 5. Check if auto-fixable (e.g. single unclosed delimiter at EOF)
+  // 5. Auto-fix single missing trailing delimiter
   if (errors.length === 1 && errors[0].code === 'SYNTAX_UNCLOSED_DELIMITER') {
     const unclosedChar = errors[0].message.includes('{')
       ? '}'
@@ -578,9 +693,8 @@ export async function validateSourceCode(
       ? ']'
       : '';
     if (unclosedChar) {
-      healedCode = code.trimEnd() + '\n' + unclosedChar + '\n';
-      // Re-check healed code
-      const recheck = checkDelimitersAndStrings(healedCode, isPython);
+      const candidateHealed = code.trimEnd() + '\n' + unclosedChar + '\n';
+      const recheck = checkDelimitersAndStrings(candidateHealed, isPython);
       if (recheck.errors.length === 0) {
         return {
           valid: true,
@@ -588,7 +702,7 @@ export async function validateSourceCode(
           errors: [],
           warnings: [`Auto-healed missing closing '${unclosedChar}' at end-of-file.`],
           autoHealed: true,
-          healedCode,
+          healedCode: candidateHealed,
         };
       }
     }
